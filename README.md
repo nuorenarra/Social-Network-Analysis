@@ -12,5 +12,7 @@ DATA
 this method assumes you are working with occurrence data, perhaps a data frame with time-stamped observations of individual X in location Y as rows. The actual location does not need to be known, just the labels of unique locations/stations/loggers, unless you want to work with social patterns controlled for spatial distance effects later on. The example data here is wood mouse logger detection data from Raulo et al. 2021, ISMEJ.
 
 References:
+
 Firth, J. A., & Sheldon, B. C. (2016). Social carry‐over effects underpin trans‐seasonally linked structure in a wild bird population. Ecology letters, 19(11), 1324-1332.
+
 Raulo, A., Allen, B. E., Troitsky, T., Husby, A., Firth, J. A., Coulson, T., & Knowles, S. C. (2021). Social networks strongly predict the gut microbiota of wild mice. The ISME journal, 1-13.
