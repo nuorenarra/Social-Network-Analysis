@@ -1,0 +1,456 @@
+---
+title: "Social network analysis using spatio-temporal co-occurrence data from non-group forming animals"
+output: html_notebook
+---
+c: Aura Raulo and Josh Firth
+
+Many animal social network analyses are based on group-by-individual data, where social association is inferred from the frequency at which two individuals are observed in the same group/flock weighted by the sum of their observation records. This method has two caveats: a) it does not take in account differences in lifespan overlap between pairs and b) it is less suitable for non-group living semi-social species with less modular and more continuous social structure
+
+Here we described a method for constructing association matrices from individual-wise spatio-temporal occurrence data (such as pit-tag station/logger data), using a life-span-overlap corrected social association index (corrected SRI, based on Firth & Sheldon 2016, Ecol. Letters) and an edge definition with user-definable intimacy threshold based on sliding time window criterion (= how close in time two individuals need to be observed in the same location to be considered "associated").
+
+1. Modify occurrence data
+- this assumes you are working with occurrence data, perhaps a data frame with time-stamped observations of individual X in location Y as rows. The actual location does not need to be known, just the labels of unique locations/stations/loggers, unless you want to work with social patterns controlled for spatial distance effects later on. 
+
+Read in logger data
+(Example data here is wood mouse logger detection data from Raulo et al. 2021, ISMEJ)
+```{r}
+
+Loggerdata<-readRDS("Example_Loggerdata.rds")
+
+```
+(Plot to look at temporal distribution of observation record per individual in the logger data)
+```{r}
+
+ldplot<-Loggerdata[,c("ID","date")]
+ldplot<-unique(ldplot)
+det<-as.data.frame(table(ldplot$ID,ldplot$date))
+colnames(det)<-c("ID","date","present")
+det$date<-as.character(det$date)
+det<-det[order(as.Date(det$date)),]
+numberkey<-data.frame(x=unique(det$ID),y=c(1:length(unique(det$ID))))
+colnames(numberkey)<-c("ID","ID_number")
+
+det<-merge(det,numberkey,by="ID",all.x=T)
+det[which(det$present=="0"),]$present<-NA
+det$present<-as.numeric(det$present)
+
+det1<-det[which(!is.na(det$present)),]
+det1$date<-as.Date(det1$date, format="%Y-%m-%d")
+
+p<-ggplot(det1, aes(x=date, y=ID_number, group=ID, col=ID)) +
+geom_point(size=4)+
+geom_line()+
+theme_bw()+
+theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+theme(legend.position = "none", text=element_text(size=20))+
+labs(x="Day of year",y="Individual Number")+
+scale_x_date(date_breaks = "7 days", date_labels = "%Y-%m-%d")+
+ggtitle("Logger detections per individual in time")
+
+```
+Suggested data modifications before social network analysis:
+
+A) Depending on the temporal resolution of your observation, decide if you want to aggregate your data stream within a time frame. Here for example, we are aggregating loggerdata so that it is treating all logging records of individual X in location Y within one hour as one single observation.
+```{r}
+
+Loggerdata<-Loggerdata[,which(colnames(Loggerdata)!="seconds")]
+Loggerdata$datetime<-substr(Loggerdata$datetime,1,16)
+
+Loggerdata<-unique(Loggerdata)
+
+```
+
+B) Order and compress loggerdata
+--> Order logger data stream within each logger according to time.
+--> Compress data so that each individual visiting-bout has only start and end time -row 
+(get rid of rows in between)
+
+```{r}
+
+#Time variables formatting
+Loggerdata$datetime<-as.POSIXct(Loggerdata$datetime, format="%Y-%m-%d %H:%M", tz="GMT") #remember to add tz=GMT when dealing with times that can happen 31st of March as that's daylight saving day
+
+#This data set is studying nocturnal animals (wood mice), so it makes sens to use "night" as the unit of time within which to look for co-occurrences rather than calendar date. Making a julian night variable for this reason
+Loggerdata$julian_date<-as.numeric(Loggerdata$date)
+
+Loggerdata$julian_night<-Loggerdata$julian_date
+for(i in 1:(nrow(Loggerdata))){
+  if(Loggerdata[i,]$hour%in%c("00","01","02","03","04","05","06","07","08","09","10","11")){
+    Loggerdata[i,]$julian_night<-Loggerdata[i,]$julian_night-1
+  }
+}
+
+# Order Loggerdata in time per logger_night to inspect location-wise data stream
+Loggerdata<-Loggerdata[order( Loggerdata$LOGGER_ID, Loggerdata$datetime),]
+
+# flag and filter away the rows between first and last observation of the same individual under same logger same day, when uninterrupted by other individuals visiting the same logger
+Loggerdata$reprow<-NA
+Loggerdata$lognight_logger<-paste(Loggerdata$julian_night,Loggerdata$LOGGER_ID, sep="-")
+
+for(i in 2:(nrow(Loggerdata)-1)){
+  if(Loggerdata[i,]$lognight_logger==Loggerdata[i-1,]$lognight_logger&
+     Loggerdata[i,]$lognight_logger==Loggerdata[i+1,]$lognight_logger&
+     Loggerdata[i,]$ID==Loggerdata[i-1,]$ID &
+     Loggerdata[i,]$ID==Loggerdata[i+1,]$ID){
+    Loggerdata[i,]$reprow<-"1"
+  }
+  else{
+    Loggerdata[i,]$reprow<-"0"
+  }
+}
+
+#Filter:
+Loggerdata$reprow<-as.factor(Loggerdata$reprow)
+Loggerdata<-Loggerdata[which(Loggerdata$reprow!="1"),]
+
+```
+C) Make a start-time and stop-time variable (datetime and datetime2) for each visiting bout of an individual
+
+Whether this step makes sense depends on the study species and the type of data. This code works with "start time" and "end time" variables for each "logger visit", to make the sliding window algorthim as realistic as possible (considering how far in time an individual was in both past and future). If you think this is not relevant for your data (e.g. your logger detects the passing of an animal individual, rather than their continuous presence), feel free to just skip this step and jump to the next (D) which sets start time and end time of visit to the same exact time.
+
+```{r}
+
+Loggerdata$datetime2<-NA
+Loggerdata$datetime2<-as.POSIXct(Loggerdata$datetime2, format = "%Y-%m-%d %H:%M")
+
+for(i in 1:(nrow(Loggerdata)-1)){
+  if(Loggerdata[i,]$ID==Loggerdata[i+1,]$ID&
+      Loggerdata[i,]$lognight_logger==Loggerdata[i+1,]$lognight_logger){
+     Loggerdata[i,]$datetime2<-Loggerdata[i+1,]$datetime
+     Loggerdata[i+1,]$reprow<-1
+}
+}
+
+#Filter
+Loggerdata<-Loggerdata[which(Loggerdata$reprow!="1"),]
+
+```
+D) For visits (either some rows of data or the whole data set) with just one time stamp, set end time to be same as start time
+```{r}
+
+Loggerdata[which(is.na(Loggerdata$datetime2)),]$datetime2<-Loggerdata[which(is.na(Loggerdata$datetime2)),]$datetime
+
+```
+E) Order loggerdata in time
+```{r}
+Loggerdata<-Loggerdata[order(Loggerdata$datetime),]
+
+```
+2. Social network analysis
+
+A) Define the function for lifespan-corrected Sliding window (Simple Ratio) association Index =(time.network.aura2) function.
+
+The "units" of this function are night-location combinations, where two individuals are declared either "associated" or "not associated" depending on the sliding window criterion of what counts as "associated"
+
+This index calculates the proportion of night-location combination where Individual A and Individual B where observed within x amount of time from each other in the same place relative to the number of night-location combinations when they were observed in general (either just one or the other or both either associated or not) during the overlap of their lifespans.
+
+- As input, this takes a gbi-matrix, t list of times and time-location combinations, and these are all separately defined in the next section (2B)
+
+- The possible association indices to use are:
+SRI: Simple Ratio index
+HW: Half-weight index 
+
+SRI_successes: Nominator of SRI - Sum of the number of instance (logger-night combinations) tow individuals were observed associated
+
+SRI_fails: Sum of the number of instance (logger-night combinations) tow individuals were observed NOT associated
+
+```{r}
+
+time.network.aura2<-function(gbi,index,time.controlled,samp.period,samp.period.place){
+am<-ya<-yb<-xab<-matrix(0,ncol(gbi),ncol(gbi))
+if(!is.numeric(samp.period))print("samp.period should be numeric")
+samp.period<-as.numeric(samp.period)
+
+for(i in 1:ncol(gbi)){
+sums<-gbi[which(gbi[,i]>0),]
+if(is.null(dim(sums))==T) {xab[,i]<-sums} else {xab[,i]<-(colSums(sums)/2)} #THIS IS "/2" because the GBI contains repeats of the grouping events, where ind 1 and ind 2 are replicated as ind 2 and ind 1
+i.samps.a<-unique(samp.period.place[which(gbi[,i]>0)])
+if(time.controlled==F){ya[,i]<-length(i.samps.a)}
+
+i.samps<-as.numeric(unique(samp.period[which(gbi[,i]>0)]))
+
+for(j in 1:ncol(gbi)){
+j.samps.a<-unique(samp.period.place[which(gbi[,j]>0)])
+if(time.controlled==F){yb[,j]<-length(j.samps.a)}
+
+j.samps<-as.numeric(unique(samp.period[which(gbi[,j]>0)]))
+
+
+if(time.controlled==T){
+if(length(i.samps)==0)print(paste("No observations of individual",i))
+if(length(j.samps)==0)print(paste("No observations of individual",j))
+
+shared.min<-max(c(min(i.samps),min(j.samps)))
+shared.max<-min(c(max(i.samps),max(j.samps)))
+
+if(!(sum(gbi[,i])==0 | sum(gbi[,j])==0)){
+if(shared.min>shared.max){ #if no overlap - marked as NA now, depends on biological question whether these zeros (never had a chance to interact) are inherently different from the "real zeros" (had a chance but didn't interact)
+ya[j,i]<-yb[j,i]<-NA} else{
+shared.range<-shared.min:shared.max
+i.sum<-sum(i.samps.a%in%samp.period.place[samp.period%in%shared.range])
+j.sum<-sum(j.samps.a%in%samp.period.place[samp.period%in%shared.range])
+ya[j,i]<-i.sum
+yb[j,i]<-j.sum
+}
+}
+}
+print}
+}
+if(index=="SRI_successes"){
+am<-xab}
+if(index=="SRI_fails"){
+am<-(ya-xab)+((yb)-xab)}
+if(index=="SRI"){
+am<-xab/(xab+(ya-xab)+((yb)-xab))}
+if(index=="HWI"){
+am<-xab/(xab+(0.5*((ya-xab)+((yb)-xab))))}
+diag(am)<-0;am[is.nan(am)]<-0;rownames(am)<-colnames(am)<-colnames(gbi)
+am}
+
+```
+
+B) CONSTRUCTING the GBI and GD matrices from loggerdata: Finding all instances that each pair of individuals was observed "associated"
+- GBI (Group by Individual) is a traditionally a matrix where rows are "groups" and columns are all individuals and numbers in the matrix depict how many times this individual was observed in this group. Here, the rows ("groups") are defined as one pair of individuals per specific night-location combination. So for example one row ("group") in the gbi matrix could be Susan-Nathalie-Location1-Night1, and it would only have binary input numbers (1/0) for columns "Susan" and "Nathalie". 1 for all the nights-location combos when they were observed "associated" , 0 for all the night-location combos they were not.
+
+Here, whether a pair is considered "associated" during a specific night-logger combination, depends on the Sliding window intimacy criterion set by the user. In other words, whether a pair gets a 0 or a 1 for a certain row ("logger-night-group") depends on whether their observation record satisfies the sliding window criteria of how close in time to each other they need to have been observed in the same location to be considered "associated".
+
+- GD has additional info about the grouping instances (=the rows of GBI).
+```{r}
+
+#Specify variables
+
+ids<-unique(Loggerdata$ID)
+
+x.min<-60 #specify the number of minutes that your sliding window criterion will consider as the definition of "associated". For example, if set to 60, the network edge will be based on the frequency at which any two individuals were observed in the same exact location within an hour of each other (during the overlap of their life spans)
+
+#Now you want to make a blank 'follow' matrix in case you want to fill in who is following who i.e. a network:
+
+AM<-matrix(0,length(ids),length(ids),dimnames=list(ids,ids))
+
+#make a GBI  
+GBI<-matrix(0,1,length(ids),dimnames=list(0,ids))
+colnames(GBI)<-ids
+
+#and also make a GBI-info-dataframe (called gd) for storing info about these group events 
+gd<-data.frame(logger="",id1="",id2="",id1.time="",id2.time="",instance="",lognight="",stringsAsFactors=F) 
+
+#Start a double loop, which is going to work its way through individual-indivdual dyads at a time
+for (i in 1:length(ids)){
+id1<-ids[i] #individual 1 is i
+for(j in 1:length(ids)){
+id2<-ids[j] #individual 2 is j
+
+#now, we only want to do the rest of the loop if individual i and j are different (could miss this out if wanted to fill in the diagonals)
+if(id1!=id2){
+
+#now cut the logger data so its only for these two individuals:
+ld.u<-Loggerdata[as.character(Loggerdata$ID) %in% c(as.character(id1),as.character(id2)),]
+
+#now cut the logger data so its only the loggers where both individuals where seen at
+shared.loggers<-unique(ld.u$LOGGER_ID[ld.u$ID%in%id1][ld.u$LOGGER_ID[ld.u$ID%in%id1] %in% ld.u$LOGGER_ID[ld.u$ID%in%id2]])
+
+#now only carry on the process if they were at some point seen on a logger (if never seen at same logger then its obviously 0)
+if(length(shared.loggers)>0){
+
+#now cut the dyads logger data to the loggers they were both seen on
+ld.u<-ld.u[as.character(ld.u$LOGGER_ID) %in% shared.loggers,]
+
+#now order the dataframe by logger and time and ID
+ld.u<-ld.u[order(ld.u$LOGGER_ID,ld.u$datetime,ld.u$ID),]
+
+#now find the instances that we see one individual, then the another, within x minutes at each logger
+
+first<-1:(nrow(ld.u)-1)
+second<-first+1
+#same logger:
+same.logger<-ld.u$LOGGER_ID[second]==ld.u$LOGGER_ID[first]
+#different id:
+diff.id<-ld.u$ID[second]!=ld.u$ID[first]
+#within x minutes:
+within.x<-abs(as.numeric(difftime(ld.u$datetime[second],ld.u$datetime2[first], units="mins"))) <x.min
+
+#an instance is when all of these are true
+instances<- same.logger & diff.id & within.x
+
+if(sum(instances)>0){
+
+#Get rid of duplicated instances within logger_lognight combination
+instances[instances][duplicated(ld.u$julian_night[second][instances])]<-F
+
+if(sum(instances)>0){
+AM[as.character(id1),as.character(id2)]<-sum(instances)
+
+#Now, from here all this part is only needed if we actually have some instances, so start another if command
+
+#and we can also store info in our GBI matrix in case that'll be helpful in future
+add.to<-nrow(GBI)+1
+GBI.u<-matrix(0,sum(instances),length(ids),dimnames=list(add.to:(nrow(GBI)+sum(instances)),ids))
+GBI.u[,c(as.character(id1),as.character(id2))]<-1
+
+#now store some info about these instances
+gd.u<-data.frame(logger=as.character(ld.u$LOGGER_ID[second][instances]),id1=id1,id2=id2,id1.time=as.character(ld.u$datetime2[second-1][instances]),id2.time=as.character(ld.u$datetime[second][instances]),instance=nrow(gd):(nrow(gd)+(length(instances[instances])-1)),lognight=as.character(ld.u$julian_night[second][instances]),stringsAsFactors=F) 
+
+
+#now bind onto master objects:
+gd<-rbind(gd,gd.u)
+GBI<-rbind(GBI,GBI.u)
+} #ends the first 'if we some instances'
+} #ends the second 'if we have some instances'
+} #ends the 'if we have some shared loggers'
+} #ends the 'if we have 2 different individuals'
+} #ends the j loop
+#now before we end the i loop we might as well print some info that might be interesting to see how the loop is progressing
+print(paste0("individual_",i," total_instances_",nrow(gd)-1))
+} #ends the i loop
+
+#Now the whole loop is over, take off the 'ghost' first row of the gd, and then all done
+gd<-gd[-1,]
+GBI<-GBI[-1,]
+rownames(GBI)<-c(1:nrow(GBI))
+
+gd$lognight_logger<-paste(gd$lognight,gd$logger,sep="-")
+
+```
+C) CONSTRUCTING the GBI and GD matrices from loggerdata: Finding all instances that each individuals was observed but not associated with anyone.
+
+Second part for finding all instances where individual was observed alone within logger-night combination
+
+Make one-individual-per-group gbi addition, remember to add all "groups" in double, to mimic the structure of the existing gbi, as that has tow inputs for each pair (one for indovidial 1 and one for individual 2 of each pair). 
+In the end these "solitary" additional gbi and gd will be rbinded to the existing "social" GBI and gd
+ 
+Here I will first make gbi and gd for all observed night-logger combinations for all individuals and subset them to not contain the logger-night-individual combos already present in the "social" GBI and gd 
+```{r}
+#MAKE SOLITARY GD data frame
+ld.a<-Loggerdata[,c("ID","LOGGER_ID","julian_night")]
+ld.a<-unique(ld.a)
+ld.a$lognight_logger<-paste(ld.a$julian_night,ld.a$LOGGER_ID,sep="-")
+ld.a$lognight_logger_ID<-paste(ld.a$lognight_logger,ld.a$ID)
+
+gd_all<-ld.a 
+length(ld.a$lognight_logger_ID)==length(unique(ld.a$lognight_logger_ID))
+gd_social1<-paste(gd$lognight_logger,gd$id1)
+gd_social2<-paste(gd$lognight_logger,gd$id2)
+all(gd_social2%in%gd_social1) #all true so can use just the other...
+
+gd_social<-paste(gd$lognight_logger,gd$id1)
+gd_social<-unique(gd_social)#
+
+gd_solitary<-gd_all[which(!gd_all$lognight_logger_ID%in%gd_social),]
+
+#double gd2 because pairwise GBI also has double observations per id
+library(splitstackshape)
+gd_solitary$freq<-2
+gd_solitary<-expandRows(gd_solitary, "freq")
+
+#Order gd_solitary to the same order as GBI
+colnames(gd_solitary)[1]<-"id1"
+iddf<-data.frame(id1=ids,idno=c(1:length(ids)))
+gd_solitary<-merge(gd_solitary,iddf,by="id1",all.x=T)
+gd_solitary<-gd_solitary[order(gd_solitary$idno),]
+gd_solitary<-gd_solitary[,1:4]
+
+gd_solitary$id2<-NA
+gd_solitary$id1.time<-NA
+gd_solitary$id2.time<-NA
+gd_solitary$instance<-c((length(gd$instance)+1):(length(gd$instance)+nrow(gd_solitary)))
+
+colnames(gd_solitary)<-c("id1","logger","lognight","lognight_logger","id2","id1.time","id2.time","instance")
+
+# MAKE SOLITARY GBI matrix
+GBI2<-matrix(0,1,length(ids),dimnames=list(0,ids))
+colnames(GBI2)<-ids
+suminstances<-as.data.frame(table(gd_solitary$id1))
+missing<-ids[which(!ids%in%suminstances$Var1)]
+if(length(missing)>0){
+  dfm<-data.frame("Var1"=missing, "Freq"=0)
+  suminstances<-rbind(suminstances,dfm)
+}
+
+#now  find the instances that we see only one individual within x time within night_logger combination
+for (i in 1:length(ids)){
+add.to<-nrow(GBI2)+1
+sumi<-(suminstances[which(suminstances$Var1==ids[i]),]$Freq) #doubling instances because pairvise GBI also has double observations per id
+if(sumi>0){
+
+GBI2.u<-matrix(0,sumi,length(ids),dimnames=list(add.to:(nrow(GBI2)+sumi),ids))
+GBI2.u[,as.character(ids[i])]<-1
+GBI2<-rbind(GBI2,GBI2.u)
+  }
+}
+
+GBI2<-GBI2[2:nrow(GBI2),]
+rownames(GBI2)<-gd_solitary$instance
+
+#Bind solitary GBI/gd to social GBI/gd
+
+GBI3<-rbind(GBI,GBI2)
+gd3<-rbind(gd,gd_solitary)
+
+```
+D) MAKE NETWORKS USING time.network.aura2()-function and the above defined GBI and gd
+```{r}
+#raw symmetrical association matrix
+AM
+
+samp.period.place<-gd3$lognight_logger
+samp.period2<-as.numeric(as.character(gd3$lognight))
+
+# Life-span corrected sliding window SRI network
+AM_SRIc_1h<-time.network.aura2(GBI3,"SRI",time.controlled=T,samp.period2,samp.period.place) 
+
+```
+E) IMPORTANT DECISION: How to deal with the two types of zeros in this network
+
+This association matrix now contains two types of zeros: 
+a) those implying that two individuals were never observed associated during the overlap of their lifespans (Currently marked as "0") and
+b) those implying that two individuals had non-overlapping life-spans (currently marked as "NA")
+
+How to treat these depends on your study question. If you are interested in for example the effects of social association on microbiome similarity, you can probably treat the NAs as zeros (as done below) because not touching someone has the same effect on your microbiome whether or not you chose to not touch or never had a chance to touch. However, if you're interested in for example social preference patterns, then it might be important to differentiate between zeros that mean not associated and zeros that mean never even had a chance to be associated, because these might have very different effects as proxies of social decisions. 
+
+```{r}
+#Here, transforming the NAs to zeros for biological reasons
+AM_SWAIc_1h[which(is.na(AM_SWAIc_1h))]<-0 
+
+#symmetrical matrix:
+all(AM_SWAIc_1h[lower.tri(AM_SWAIc_1h)]==(t(AM_SWAIc_1h)[lower.tri(AM_SWAIc_1h)]))
+
+```
+Plot network
+```{r}
+library(igraph)
+AM<-AM_SWAIc_1h
+logged_individuals<-rownames(AM)
+#make igraph adjacency matrix for plotting:
+net<- graph.adjacency(AM, mode= 'undirected', weighted=TRUE, diag=FALSE)
+
+#call in individual metadata and order
+demo<-readRDS("individual_metadata.rds")
+demo<-demo[which(demo$ID%in%logged_individuals),]#109
+nameorder<-rownames(AM)
+demo<-demo[match(nameorder, demo$ID),]
+
+#colour and shape for sexes in the plot:
+demo$Sex<-as.factor(demo$Sex)
+demo$sexshape<-demo$Sex
+levels(demo$sexshape)<-c("circle","square")
+demo$sexshape<-as.character(demo$sexshape)
+sex.numeric<- as.numeric(demo$Sex)
+demo$sexcolor<-rainbow(length(unique(demo$Sex)))[sex.numeric]
+
+#calculate degree for each individual to be used as a plotting aesthetic (node size)
+AM_binary<-AM
+AM_binary[AM_binary>0]=1
+demo$degree<- rowSums(AM_binary[])
+
+#Simple igraph plot:  
+ plot(net, 
+       vertex.color=demo$sexcolor,
+       vertex.frame.color=demo$sexcolor,
+       vertex.shape=demo$sexshape,
+       vertex.size=(demo$degree*0.6), #tune for ploting
+       vertex.label=NA, 
+       edge.color="black",
+       edge.width= 6*(E(net)$weight^0.8), #tune for plotting
+       edge.curved=0.4)
+
+```
