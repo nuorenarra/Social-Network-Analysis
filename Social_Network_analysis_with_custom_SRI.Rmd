@@ -275,6 +275,8 @@ instances<- same.logger & diff.id & within.x
 if(sum(instances)>0){
 
 #Get rid of duplicated instances within logger_lognight combination
+## (Note: while the code seems to filter instances based on them happening during the same night, this is actually getting rid of instances within same night-logger combination, because instances are already, by definition (see line 273) happening within the same logger.)
+
 instances[instances][duplicated(ld.u$julian_night[second][instances])]<-F
 
 if(sum(instances)>0){
