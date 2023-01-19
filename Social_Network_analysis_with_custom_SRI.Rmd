@@ -6,13 +6,15 @@ c: Aura Raulo and Josh Firth
 
 Many animal social network analyses are based on group-by-individual data, where social association is inferred from the frequency at which two individuals are observed in the same group/flock weighted by the sum of their observation records. This method has two caveats: a) it does not take in account differences in lifespan overlap between pairs and b) it is less suitable for non-group living semi-social species with less modular and more continuous social structure
 
-Here we described a method for constructing association matrices from individual-wise spatio-temporal occurrence data (such as pit-tag station/logger data), using a life-span-overlap corrected social association index (corrected SRI, based on Firth & Sheldon 2016, Ecol. Letters) and an edge definition with user-definable intimacy threshold based on sliding time window criterion (= how close in time two individuals need to be observed in the same location to be considered "associated").
+Here we described a method for constructing association matrices from individual-wise spatio-temporal occurrence data (such as pit-tag station/logger data), using a life-span-overlap corrected social association index (corrected SRI, based on Firth & Sheldon 2016, Ecol. Letters) and an edge definition with user-definable intimacy threshold based on a sliding time window criterion (= how close in time two individuals need to be observed in the same location to be considered "associated").
+
+This code uses unique julian nights as the units of analysis, i.e. simple ratio index is calculated as the ratio between  nights where two individuals were observed associated (=within x amount of time at the same location) / sum of nights where both or either individual were observed at all, with observations limited to the known overlap in the lifespan of the tow individuals. 
 
 1. Modify occurrence data
 - this assumes you are working with occurrence data, perhaps a data frame with time-stamped observations of individual X in location Y as rows. The actual location does not need to be known, just the labels of unique locations/stations/loggers, unless you want to work with social patterns controlled for spatial distance effects later on. 
 
 Read in logger data
-(Example data here is wood mouse logger detection data from Raulo et al. 2021, ISMEJ)
+(Example data here is wood mouse logger detection data from Raulo et al. in prep)
 ```{r}
 
 Loggerdata<-readRDS("Example_Loggerdata.rds")
@@ -20,6 +22,7 @@ Loggerdata<-readRDS("Example_Loggerdata.rds")
 ```
 (Plot to look at temporal distribution of observation record per individual in the logger data)
 ```{r}
+library(ggplot2)
 
 ldplot<-Loggerdata[,c("ID","date")]
 ldplot<-unique(ldplot)
@@ -46,11 +49,11 @@ theme(legend.position = "none", text=element_text(size=20))+
 labs(x="Day of year",y="Individual Number")+
 scale_x_date(date_breaks = "7 days", date_labels = "%Y-%m-%d")+
 ggtitle("Logger detections per individual in time")
-
+p
 ```
 Suggested data modifications before social network analysis:
 
-A) Depending on the temporal resolution of your observation, decide if you want to aggregate your data stream within a time frame. Here for example, we are aggregating loggerdata so that it is treating all logging records of individual X in location Y within one hour as one single observation.
+A) Depending on the temporal resolution of your observation, decide if you want to aggregate your data stream within a time frame. Here for example, we are aggregating loggerdata so that it is treating all logging records of individual X in location Y within one minute as one single observation.
 ```{r}
 
 Loggerdata<-Loggerdata[,which(colnames(Loggerdata)!="seconds")]
@@ -106,7 +109,7 @@ Loggerdata<-Loggerdata[which(Loggerdata$reprow!="1"),]
 ```
 C) Make a start-time and stop-time variable (datetime and datetime2) for each visiting bout of an individual
 
-Whether this step makes sense depends on the study species and the type of data. This code works with "start time" and "end time" variables for each "logger visit", to make the sliding window algorthim as realistic as possible (considering how far in time an individual was in both past and future). If you think this is not relevant for your data (e.g. your logger detects the passing of an animal individual, rather than their continuous presence), feel free to just skip this step and jump to the next (D) which sets start time and end time of visit to the same exact time.
+Whether this step makes sense depends on the study species and the type of data. This code works with "start time" and "end time" variables for each "logger visit", to make the sliding window algorithm as realistic as possible (considering how far in time an individual was in both past and future). If you think this is not relevant for your data (e.g. your logger detects the passing of an animal individual, rather than their continuous presence), feel free to just skip this step and jump to the next (D) which sets start time and end time of visit to the same exact time.
 
 ```{r}
 
@@ -140,19 +143,19 @@ Loggerdata<-Loggerdata[order(Loggerdata$datetime),]
 
 A) Define the function for lifespan-corrected Sliding window (Simple Ratio) association Index =(time.network.aura2) function.
 
-The "units" of this function are night-location combinations, where two individuals are declared either "associated" or "not associated" depending on the sliding window criterion of what counts as "associated"
+The "units" of this function are nights, where two individuals are declared either "associated" or "not associated" depending on the sliding window criterion of what counts as "associated"
 
-This index calculates the proportion of night-location combination where Individual A and Individual B where observed within x amount of time from each other in the same place relative to the number of night-location combinations when they were observed in general (either just one or the other or both either associated or not) during the overlap of their lifespans.
+This index calculates the proportion of nights where Individual A and Individual B were observed within x amount of time from each other in the same place (by same logger) relative to the number of nights when they were observed in general (either just one or the other or both either associated or not) during the overlap of their lifespans.
 
-- As input, this takes a gbi-matrix, t list of times and time-location combinations, and these are all separately defined in the next section (2B)
+- As input, this takes a gbi-matrix, list of times (for lifespan overlap inference) and time-location combinations, and these are all separately defined in the next section (2B)
 
 - The possible association indices to use are:
 SRI: Simple Ratio index
 HW: Half-weight index 
 
-SRI_successes: Nominator of SRI - Sum of the number of instance (logger-night combinations) tow individuals were observed associated
+SRI_successes: Nominator of SRI - Sum of the number of instances (nights) where two individuals were observed associated
 
-SRI_fails: Sum of the number of instance (logger-night combinations) tow individuals were observed NOT associated
+SRI_fails: Sum of the number of instances (nights) where two individuals were observed but NOT associated
 
 ```{r}
 
@@ -164,6 +167,7 @@ samp.period<-as.numeric(samp.period)
 for(i in 1:ncol(gbi)){
 sums<-gbi[which(gbi[,i]>0),]
 if(is.null(dim(sums))==T) {xab[,i]<-sums} else {xab[,i]<-(colSums(sums)/2)} #THIS IS "/2" because the GBI contains repeats of the grouping events, where ind 1 and ind 2 are replicated as ind 2 and ind 1
+
 i.samps.a<-unique(samp.period.place[which(gbi[,i]>0)])
 if(time.controlled==F){ya[,i]<-length(i.samps.a)}
 
@@ -200,6 +204,10 @@ if(index=="SRI_successes"){
 am<-xab}
 if(index=="SRI_fails"){
 am<-(ya-xab)+((yb)-xab)}
+if(index=="SRI_fails_ya"){
+am<-(ya)}
+if(index=="SRI_fails_yb"){
+am<-(yb)}
 if(index=="SRI"){
 am<-xab/(xab+(ya-xab)+((yb)-xab))}
 if(index=="HWI"){
@@ -210,9 +218,9 @@ am}
 ```
 
 B) CONSTRUCTING the GBI and GD matrices from loggerdata: Finding all instances that each pair of individuals was observed "associated"
-- GBI (Group by Individual) is a traditionally a matrix where rows are "groups" and columns are all individuals and numbers in the matrix depict how many times this individual was observed in this group. Here, the rows ("groups") are defined as one pair of individuals per specific night-location combination. So for example one row ("group") in the gbi matrix could be Susan-Nathalie-Location1-Night1, and it would only have binary input numbers (1/0) for columns "Susan" and "Nathalie". 1 for all the nights-location combos when they were observed "associated" , 0 for all the night-location combos they were not.
+- GBI (Group by Individual) is a traditionally a matrix where rows are "groups" and columns are all individuals and numbers in the matrix depict how many times this individual was observed in this group. Here, the rows ("groups") are defined as one pair of individuals per specific night-location combination. So for example one row ("group") in the gbi matrix could be Susan-Nathalie-Location1-Night1, and it would only have binary input numbers (1/0) for all individuals, in this example row 1 for columns "Susan" and "Nathalie" and 0 for all other individuals. 
 
-Here, whether a pair is considered "associated" during a specific night-logger combination, depends on the Sliding window intimacy criterion set by the user. In other words, whether a pair gets a 0 or a 1 for a certain row ("logger-night-group") depends on whether their observation record satisfies the sliding window criteria of how close in time to each other they need to have been observed in the same location to be considered "associated".
+Here, whether a pair is considered "associated" during a specific night-logger combination, depends on the Sliding window intimacy criterion set by the user. In other words, whether a pair gets a 0 or a 1 for a certain row ("logger-night-group") depends on whether their observation record satisfies the sliding window criteria of how close in time of each other they need to have been observed in the same location to be considered "associated".
 
 - GD has additional info about the grouping instances (=the rows of GBI).
 ```{r}
@@ -274,8 +282,7 @@ instances<- same.logger & diff.id & within.x
 
 if(sum(instances)>0){
 
-#Get rid of duplicated instances within logger_lognight combination
-## (Note: while the code seems to filter instances based on them happening during the same night, this is actually getting rid of instances within same night-logger combination, because instances are already, by definition (see line 273) happening within the same logger.)
+#Get rid of duplicated instances within night 
 
 instances[instances][duplicated(ld.u$julian_night[second][instances])]<-F
 
@@ -315,9 +322,9 @@ gd$lognight_logger<-paste(gd$lognight,gd$logger,sep="-")
 ```
 C) CONSTRUCTING the GBI and GD matrices from loggerdata: Finding all instances that each individuals was observed but not associated with anyone.
 
-Second part for finding all instances where individual was observed alone within logger-night combination
+Second part for finding all instances where individual was observed alone (not within x amount of time from anyone) within one night
 
-Make one-individual-per-group gbi addition, remember to add all "groups" in double, to mimic the structure of the existing gbi, as that has tow inputs for each pair (one for indovidial 1 and one for individual 2 of each pair). 
+Make one-individual-per-group gbi addition, remember to add all "groups" in double, to mimic the structure of the existing gbi, as that has two inputs for each pair (one for individual 1 and one for individual 2 of each pair). 
 In the end these "solitary" additional gbi and gd will be rbinded to the existing "social" GBI and gd
  
 Here I will first make gbi and gd for all observed night-logger combinations for all individuals and subset them to not contain the logger-night-individual combos already present in the "social" GBI and gd 
@@ -339,6 +346,11 @@ gd_social<-unique(gd_social)#
 
 gd_solitary<-gd_all[which(!gd_all$lognight_logger_ID%in%gd_social),]
 
+#Get rid of repeat observations of same individual during same night
+gd_solitary$unique_obs<-paste(gd_solitary$ID,gd_solitary$julian_night, sep="_" )
+gd_solitary<-gd_solitary[which(!duplicated(gd_solitary$unique_obs)),]
+gd_solitary<-gd_solitary[,which(colnames(gd_solitary)!="unique_obs")]
+
 #double gd2 because pairwise GBI also has double observations per id
 library(splitstackshape)
 gd_solitary$freq<-2
@@ -358,6 +370,7 @@ gd_solitary$instance<-c((length(gd$instance)+1):(length(gd$instance)+nrow(gd_sol
 
 colnames(gd_solitary)<-c("id1","logger","lognight","lognight_logger","id2","id1.time","id2.time","instance")
 
+
 # MAKE SOLITARY GBI matrix
 GBI2<-matrix(0,1,length(ids),dimnames=list(0,ids))
 colnames(GBI2)<-ids
@@ -368,7 +381,7 @@ if(length(missing)>0){
   suminstances<-rbind(suminstances,dfm)
 }
 
-#now  find the instances that we see only one individual within x time within night_logger combination
+#now  find the instances that we see only one individual within x time within a night
 for (i in 1:length(ids)){
 add.to<-nrow(GBI2)+1
 sumi<-(suminstances[which(suminstances$Var1==ids[i]),]$Freq) #doubling instances because pairvise GBI also has double observations per id
@@ -387,7 +400,6 @@ rownames(GBI2)<-gd_solitary$instance
 
 GBI3<-rbind(GBI,GBI2)
 gd3<-rbind(gd,gd_solitary)
-
 ```
 D) MAKE NETWORKS USING time.network.aura2()-function and the above defined GBI and gd
 ```{r}
