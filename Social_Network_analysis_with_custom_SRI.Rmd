@@ -404,13 +404,17 @@ gd3<-rbind(gd,gd_solitary)
 D) MAKE NETWORKS USING time.network.aura2()-function and the above defined GBI and gd
 ```{r}
 #raw symmetrical association matrix
-AM
+raw_count_network<-AM
 
 samp.period.place<-gd3$lognight_logger
 samp.period2<-as.numeric(as.character(gd3$lognight))
 
 # Life-span corrected sliding window SRI network
-AM_SRIc_1h<-time.network.aura2(GBI3,"SRI",time.controlled=T,samp.period2,samp.period.place) 
+AM_SRIc_1h<-time.network.aura2(GBI3,"SRI",time.controlled=T,samp.period2,samp.period.place)
+
+#plot on correlation between two networks:
+#here need to make two networks first
+#plot(AM_SRIc_1h[lower.tri(AM_SRIc_1h)],AM_SRIc_12h[lower.tri(AM_SRIc_12h)])
 
 ```
 E) IMPORTANT DECISION: How to deal with the two types of zeros in this network
@@ -423,23 +427,23 @@ How to treat these depends on your study question. If you are interested in for 
 
 ```{r}
 #Here, transforming the NAs to zeros for biological reasons
-AM_SWAIc_1h[which(is.na(AM_SWAIc_1h))]<-0 
+AM_SRIc_1h[which(is.na(AM_SRIc_1h))]<-0 
 
-#symmetrical matrix:
-all(AM_SWAIc_1h[lower.tri(AM_SWAIc_1h)]==(t(AM_SWAIc_1h)[lower.tri(AM_SWAIc_1h)]))
+#is this a fully symmetrical matrix?
+all(AM_SRIc_1h[lower.tri(AM_SRIc_1h)]==(t(AM_SRIc_1h)[lower.tri(AM_SRIc_1h)]))
 
 ```
 Plot network
 ```{r}
 library(igraph)
-AM<-AM_SWAIc_1h
+AM<-AM_SRIc_1h
 logged_individuals<-rownames(AM)
 #make igraph adjacency matrix for plotting:
 net<- graph.adjacency(AM, mode= 'undirected', weighted=TRUE, diag=FALSE)
 
 #call in individual metadata and order
 demo<-readRDS("individual_metadata.rds")
-demo<-demo[which(demo$ID%in%logged_individuals),]#109
+demo<-demo[which(demo$ID%in%logged_individuals),]#159
 nameorder<-rownames(AM)
 demo<-demo[match(nameorder, demo$ID),]
 
